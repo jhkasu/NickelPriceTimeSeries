@@ -1,0 +1,7 @@
+"0","model <- keras_model_sequential() %>%"
+"0","  layer_lstm(units = 50, input_shape = c(12, 4)) %>%"
+"0","  layer_dense(units = 1)"
+"2","Error in py_call_impl(callable, call_args$unnamed, call_args$named) : 
+  ValueError: Only input tensors may be passed as positional arguments. The following argument value should be passed as a keyword argument: <Sequential name=sequential, built=False> (of type <class 'keras.src.models.sequential.Sequential'>)
+[90mRun ]8;;rstudio:run:reticulate::py_last_error()`reticulate::py_last_error()`]8;; for details.[39m
+"

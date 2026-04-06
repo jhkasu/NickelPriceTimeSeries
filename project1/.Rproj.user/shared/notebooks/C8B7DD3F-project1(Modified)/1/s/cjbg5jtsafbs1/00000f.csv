@@ -1,0 +1,3 @@
+"0","# Reshape y data to fit Keras model"
+"0","y_train <- array_reshape(y_train, c(length(y_train), 1))"
+"0","y_test  <- array_reshape(y_test,  c(length(y_test), 1))"

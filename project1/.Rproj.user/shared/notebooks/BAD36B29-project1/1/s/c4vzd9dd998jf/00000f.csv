@@ -1,0 +1,7 @@
+"0","merged <- merged %>%"
+"0","  arrange(observation_date) %>%"
+"0","  mutate("
+"0","    PNICKUSDM_lag1 = dplyr::lag(PNICKUSDM, 1),"
+"0","    PNICKUSDM_lag3 = dplyr::lag(PNICKUSDM, 3)"
+"0","  ) %>%"
+"0","  drop_na()"

@@ -1,0 +1,4 @@
+"0","# Scale all features (Z-score normalization) for the LSTM model"
+"0","scaled <- merged_stationary %>%"
+"0","  dplyr::mutate(across(-observation_date, ~ scale(.)[,1]))"
+"0","head(scaled)"

@@ -1,0 +1,10 @@
+"0","library(keras)"
+"0",""
+"0","model <- keras_model_sequential() |>"
+"0","  layer_input(shape = c(12, 4)) |>"
+"0","  layer_lstm(units = 50) |>"
+"0","  layer_dense(units = 1)"
+"2","Error in py_call_impl(callable, call_args$unnamed, call_args$named) : 
+  ValueError: You cannot pass both `shape` and `batch_shape` at the same time.
+[90mRun ]8;;rstudio:run:reticulate::py_last_error()`reticulate::py_last_error()`]8;; for details.[39m
+"

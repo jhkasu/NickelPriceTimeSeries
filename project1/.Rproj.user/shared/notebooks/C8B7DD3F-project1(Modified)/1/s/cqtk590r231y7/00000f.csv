@@ -1,0 +1,8 @@
+"0","# Split data into 80% train and 20% test sets"
+"0","train_size <- floor(0.8 * length(seq_data$y))"
+"0",""
+"0","X_train <- seq_data$X[1:train_size,,]"
+"0","y_train <- seq_data$y[1:train_size]"
+"0",""
+"0","X_test <- seq_data$X[(train_size + 1):length(seq_data$y),,,drop=FALSE]"
+"0","y_test <- seq_data$y[(train_size + 1):length(seq_data$y)]"

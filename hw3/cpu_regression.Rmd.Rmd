@@ -1,0 +1,93 @@
+---
+title: "Simple Linear Regression: CPU Cores vs. Performance"
+output: ioslides_presentation
+---
+
+<style type="text/css">
+body p, div, h1, h2, h3, h4, h5 {
+ color: black;
+ font-family: Modern Computer Roman;
+}
+slides > slide.title-slide hgroup h1 {
+ color: #8C1D40;
+}
+h2 {
+ color: #8C1D40;
+}
+</style>
+
+## Data Preparation
+```{r setup, include=FALSE}
+library(ggplot2)
+library(plotly)
+library(knitr)
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+cpu_data <- read.csv("CPU.csv") 
+clean_data <- na.omit(cpu_data[, c("cores", "cpuMark")])
+```
+
+Dataset: `r nrow(cpu_data)` CPUs
+
+Variables: cores (X) and cpuMark (Y)
+
+## Simple Linear Regression Model
+
+$$Y = \beta_0 + \beta_1 X + \epsilon$$
+
+- $Y$ = cpuMark
+- $X$ = cores
+- $\beta_0$ = intercept
+- $\beta_1$ = slope
+
+## Scatter Plot
+```{r plot1, echo=FALSE, fig.height=4.5}
+ggplot(clean_data, aes(x = cores, y = cpuMark)) +
+  geom_point(alpha = 0.5, color = "#8C1D40") +
+  geom_smooth(method = "lm", color = "#FFC627") +
+  theme_minimal()
+```
+
+## Fitting the Model
+```{r model, echo=TRUE}
+model <- lm(cpuMark ~ cores, data = clean_data)
+summary(model)
+```
+
+## Model Equation
+```{r coef, echo=FALSE}
+b0 <- round(coef(model)[1], 2)
+b1 <- round(coef(model)[2], 2)
+```
+
+$$\hat{Y} = `r b0` + `r b1` X$$
+
+R² = `r round(summary(model)$r.squared, 3)`
+
+## Residual Plot
+```{r plot2, echo=FALSE, fig.height=4.5}
+ggplot(data.frame(fitted = fitted(model), resid = residuals(model)), 
+       aes(x = fitted, y = resid)) +
+  geom_point(alpha = 0.5, color = "#8C1D40") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  theme_minimal()
+```
+
+## 3D Visualization
+```{r plotly, echo=FALSE, fig.height=4.5}
+plot_data <- na.omit(cpu_data[, c("cores", "cpuMark", "price")])
+plot_data <- plot_data[plot_data$price > 0, ]
+
+plot_ly(plot_data, x = ~cores, y = ~price, z = ~cpuMark,
+        type = "scatter3d", mode = "markers",
+        marker = list(size = 3, color = ~cpuMark, colorscale = "Viridis"))
+```
+
+## Conclusion
+
+More cores = higher performance
+
+Slope: `r b1` points per core
+
+Model fits well (R² = `r round(summary(model)$r.squared, 3)`)

@@ -1,0 +1,8 @@
+"0","library(tensorflow)"
+"0",""
+"0","model <- tf$keras$models$Sequential()"
+"0","model$add(tf$keras$layers$LSTM(units = 50, input_shape = c(12L, 4L)))"
+"2","Error in py_call_impl(callable, call_args$unnamed, call_args$named) : 
+  ValueError: Cannot convert '(4, 200.0)' to a shape. Found invalid entry '200.0' of type '<class 'float'>'. 
+[90mRun ]8;;rstudio:run:reticulate::py_last_error()`reticulate::py_last_error()`]8;; for details.[39m
+"

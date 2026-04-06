@@ -1,0 +1,6 @@
+"0","# Generate 30-day forecast"
+"0","forecast_result <- forecast(arima_model, h = 30)"
+"0",""
+"0","# Plot forecast"
+"0","plot(forecast_result, main = ""NVIDIA Stock Price Forecast (Next 30 Days)"","
+"0","     xlab = ""Time"", ylab = ""Price (USD)"")"

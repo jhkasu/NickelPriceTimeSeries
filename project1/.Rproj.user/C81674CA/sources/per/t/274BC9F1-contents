@@ -1,0 +1,272 @@
+---
+title: "project1"
+author: "Jooho"
+date: "2025-10-29"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+# Load necessary libraries
+library(dplyr)
+library(purrr)
+library(keras)
+library(tensorflow)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+```
+
+```{r}
+# Load all feature datasets
+nickel <- read.csv("data/PNICKUSDM.csv")
+dxy <- read.csv("data/DTWEXBGS.csv")
+cpi <- read.csv("data/CPIAUCSL.csv")
+indpro <- read.csv("data/INDPRO.csv")
+dgs10 <- read.csv("data/DGS10.csv")
+pcoppusdm <- read.csv("data/PCOPPUSDM.csv")
+
+# Convert daily DGS10 (10-yr Treasury) to monthly average
+dgs10_monthly <- dgs10 %>%
+  mutate(observation_date = as.Date(observation_date)) %>%
+  mutate(yearmon = floor_date(observation_date, "month")) %>%
+  group_by(yearmon) %>%
+  summarise(DGS10 = mean(DGS10, na.rm = TRUE)) %>%
+  rename(observation_date = yearmon)
+```
+
+```{r merge_data}
+# Merge all datasets into a single data frame
+merged <- reduce(list(nickel, dxy, cpi, indpro, dgs10_monthly, pcoppusdm),
+                 function(x, y) merge(x, y, by = "observation_date", all = FALSE))
+write.csv(merged, "data/merged.csv", row.names = FALSE)
+merged <- na.omit(merged)
+summary(merged)
+```
+```{r feature_engineering_stationary}
+# Create lag features (1-month and 3-month)
+merged_with_lags <- merged %>%
+  arrange(observation_date) %>%
+  mutate(
+    PNICKUSDM_lag1 = dplyr::lag(PNICKUSDM, 1),
+    PNICKUSDM_lag3 = dplyr::lag(PNICKUSDM, 3)
+  ) %>%
+  drop_na() 
+
+# Save the original prices for un-transforming the test set later
+y_test_prev_prices <- merged_with_lags$PNICKUSDM[118:142]
+
+# Make data stationary:
+# Use log-difference for price-like data
+# Use difference for interest rates (DGS10)
+merged_stationary <- merged_with_lags %>%
+  mutate(
+    DGS10_diff = DGS10 - dplyr::lag(DGS10, 1),
+    across(c(PNICKUSDM, DTWEXBGS, CPIAUCSL, INDPRO, PNICKUSDM_lag1, PNICKUSDM_lag3, PCOPPUSDM),
+           ~ (log(.x) - log(dplyr::lag(.x, 1))) )
+  ) %>%
+  select(-DGS10) %>%
+  rename(DGS10 = DGS10_diff) %>%
+  drop_na()
+```
+
+```{r scale_data}
+# Scale all features (Z-score normalization) for the LSTM model
+scaled <- merged_stationary %>%
+  dplyr::mutate(across(-observation_date, ~ scale(.)[,1]))
+head(scaled)
+```
+
+```{r create_sequences}
+# Define function to convert time series data into sequences for LSTM
+make_sequences <- function(data, seq_len = 18) {
+  X <- list()
+  y <- list()
+  for (i in 1:(nrow(data) - seq_len)) {
+    # 8 features (WTI removed)
+    X[[i]] <- as.matrix(data[i:(i + seq_len - 1), c("PNICKUSDM", "DTWEXBGS", "CPIAUCSL", "INDPRO", "DGS10", "PNICKUSDM_lag1", "PNICKUSDM_lag3", "PCOPPUSDM")])
+    y[[i]] <- data[i + seq_len, "PNICKUSDM"]
+  }
+  list(
+    # Output shape: (samples, 18 timesteps, 8 features)
+    X = array(do.call(rbind, X), dim = c(length(X), seq_len, 8)),
+    y = unlist(y)
+  )
+}
+
+seq_data <- make_sequences(scaled, seq_len = 18)
+```
+
+```{r split_data}
+# Split data into 80% train and 20% test sets
+train_size <- floor(0.8 * length(seq_data$y))
+
+X_train <- seq_data$X[1:train_size,,]
+y_train <- seq_data$y[1:train_size]
+
+X_test <- seq_data$X[(train_size + 1):length(seq_data$y),,,drop=FALSE]
+y_test <- seq_data$y[(train_size + 1):length(seq_data$y)]
+```
+
+```{r build_model}
+# Define the LSTM model structure (1 layer, 64 units)
+input <- tf$keras$Input(shape = c(18L, 8L))
+lstm1 <- tf$keras$layers$LSTM(units = 64L, return_sequences = FALSE)(input) 
+drop1 <- tf$keras$layers$Dropout(rate = 0.1)(lstm1)
+output <- tf$keras$layers$Dense(units = 1L)(drop1)
+
+model <- tf$keras$Model(inputs = input, outputs = output)
+
+# Compile the model with Adam optimizer and MSE loss
+model$compile(
+  loss = "mse",
+  optimizer = optimizer_adam(learning_rate = 0.0005)
+)
+
+summary(model)
+```
+
+```{r fix_y_shape}
+# Reshape y data to fit Keras model
+y_train <- array_reshape(y_train, c(length(y_train), 1))
+y_test  <- array_reshape(y_test,  c(length(y_test), 1))
+```
+
+```{r train_model}
+# Define Early Stopping to prevent overfitting
+callback_es <- tf$keras$callbacks$EarlyStopping(
+  monitor = "val_loss",
+  patience = 20L,
+  restore_best_weights = TRUE
+)
+
+# Train the model
+history <- model$fit(
+  X_train, y_train,
+  epochs = 300L,
+  batch_size = 16L,
+  validation_data = list(X_test, y_test),
+  verbose = 1L,
+  callbacks = list(callback_es)
+)
+```
+
+```{r eval_side_by_side}
+# Get mean/sd of the *stationary* data for un-scaling
+mean_val <- mean(merged_stationary$PNICKUSDM, na.rm = TRUE)
+sd_val <- sd(merged_stationary$PNICKUSDM, na.rm = TRUE)
+
+# Un-scale predictions and actual values
+actual_pct_change <- as.vector(y_test) * sd_val + mean_val
+pred_pct_change <- as.vector(model$predict(X_test)) * sd_val + mean_val
+
+# Un-transform log-difference back to original price
+actual_price <- (actual_pct_change * y_test_prev_prices) + y_test_prev_prices
+pred_price <- (pred_pct_change * y_test_prev_prices) + y_test_prev_prices
+
+# Get dates for the test set
+test_dates <- tail(as.Date(merged_stationary$observation_date), length(actual_price))
+
+# Calculate RMSE and MAE
+res <- data.frame(date = test_dates, actual = round(actual_price, 0), pred = round(pred_price, 0))
+rmse <- sqrt(mean((res$pred - res$actual)^2))
+mae <- mean(abs(res$pred - res$actual))
+
+list(head = res[1:10, ], RMSE = round(rmse, 0), MAE = round(mae, 0))
+```
+
+```{r plot_predictions}
+# Plot Actual vs. Predicted values
+ggplot(res, aes(x = date)) +
+  geom_line(aes(y = actual, color = "Actual"), size = 1) +
+  geom_line(aes(y = pred, color = "Predicted"), size = 1, linetype = "dashed") +
+  scale_color_manual(values = c("Actual" = "blue", "Predicted" = "red")) +
+  labs(
+    title = "LSTM Model: Actual vs. Predicted Nickel Prices",
+    x = "Date",
+    y = "Nickel Price (USD)",
+    color = "Legend"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r forecast_recursive}
+# --- 1. Settings ---
+n_forecast <- 12  # Forecast 12 months ahead
+n_features <- 8    # 8 features
+seq_len <- 18      
+
+feature_names <- c("PNICKUSDM", "DTWEXBGS", "CPIAUCSL", "INDPRO", "DGS10", "PNICKUSDM_lag1", "PNICKUSDM_lag3", "PCOPPUSDM")
+
+# --- 2. Prepare inputs and un-transform values ---
+current_input_scaled <- tail(scaled, seq_len) %>%
+  select(all_of(feature_names))
+
+mean_val_log_diff <- mean(merged_stationary$PNICKUSDM, na.rm = TRUE)
+sd_val_log_diff <- sd(merged_stationary$PNICKUSDM, na.rm = TRUE)
+last_actual_price <- tail(merged_with_lags$PNICKUSDM, 1)
+
+# --- 3. Recursive forecast loop ---
+forecast_list_scaled <- list()
+forecast_list_prices <- list()
+current_last_price <- last_actual_price
+
+for (i in 1:n_forecast) {
+  # 3a. Format input for model
+  input_for_model <- as.matrix(current_input_scaled) %>%
+    array_reshape(c(1, seq_len, n_features))
+  
+  # 3b. Predict (t+i)
+  pred_scaled_log_diff <- as.vector(model$predict(input_for_model))
+  forecast_list_scaled[[i]] <- pred_scaled_log_diff
+  
+  # 3c. Un-transform prediction back to price
+  pred_log_diff <- pred_scaled_log_diff * sd_val_log_diff + mean_val_log_diff
+  predicted_price <- current_last_price * exp(pred_log_diff)
+  
+  forecast_list_prices[[i]] <- predicted_price
+  current_last_price <- predicted_price # Update last price for next loop
+  
+  # --- 3d. Create new input row for next loop ---
+  # Assumes all 7 external features remain constant
+  last_known_features <- tail(current_input_scaled, 1)
+  
+  new_input_row <- data.frame(
+    PNICKUSDM = pred_scaled_log_diff, # Use new prediction
+    DTWEXBGS = last_known_features$DTWEXBGS,
+    CPIAUCSL = last_known_features$CPIAUCSL,
+    INDPRO = last_known_features$INDPRO,
+    DGS10 = last_known_features$DGS10,
+    PNICKUSDM_lag1 = last_known_features$PNICKUSDM,
+    PNICKUSDM_lag3 = current_input_scaled$PNICKUSDM[seq_len - 2],
+    PCOPPUSDM = last_known_features$PCOPPUSDM
+  )
+  
+  # Roll the input window
+  current_input_scaled <- rbind(tail(current_input_scaled, seq_len - 1), new_input_row)
+}
+
+# --- 4. Format and print forecast ---
+last_date <- as.Date(tail(merged_stationary$observation_date, 1))
+forecast_dates <- seq(from = (last_date %m+% months(1)), by = "month", length.out = n_forecast)
+
+forecast_df <- data.frame(
+  date = forecast_dates,
+  forecasted_price = round(unlist(forecast_list_prices), 0)
+)
+
+print("--- 12-Month Recursive Forecast ---")
+print(forecast_df)
+
+# --- 5. Plot recursive forecast ---
+ggplot(forecast_df, aes(x = date, y = forecasted_price)) +
+  geom_line(color = "red", size = 1) +
+  geom_point(color = "red", size = 2) +
+  labs(
+    title = "12-Month Recursive Forecast",
+    x = "Forecast Date",
+    y = "Predicted Nickel Price (USD)"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```

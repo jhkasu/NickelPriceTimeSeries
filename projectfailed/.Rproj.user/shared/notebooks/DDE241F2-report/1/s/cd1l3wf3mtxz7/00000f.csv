@@ -1,0 +1,6 @@
+"0","ggplot(df_adjusted, aes(x = date, y = close)) +"
+"0","  geom_line(color = ""steelblue"") +"
+"0","  labs(title = ""NVIDIA (NVDA) Adjusted Historical Closing Price"","
+"0","       x = ""Date"","
+"0","       y = ""Adjusted Closing Price (USD)"") +"
+"0","  theme_minimal()"

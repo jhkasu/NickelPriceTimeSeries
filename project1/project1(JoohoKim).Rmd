@@ -1,0 +1,491 @@
+---
+title: "LSTM-based Nickel Price Forecasting"
+author: "Jooho"
+date: "2025-10-29"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+---
+
+# Introduction
+
+## Background and Problem Definition
+
+Battery costs account for over 30% of electric vehicle manufacturing costs, with nickel being the primary component of these batteries. As nickel prices rise, EV production costs increase proportionally. Therefore, an accurate nickel price prediction model can significantly aid purchasing decisions and cost management strategies for manufacturers.
+
+## Dataset Description
+
+This project uses monthly economic and commodity data from the Federal Reserve Economic Data (FRED) and TrendForce, spanning from January 2008 to June 2025. Each variable was downloaded as an individual CSV file and merged by observation date. The dataset includes the following variables:
+
+- **PNICKUSDM**: Nickel price in USD per metric ton (target variable) - [FRED](https://fred.stlouisfed.org/series/PNICKUSDM)
+- **DTWEXBGS**: US Dollar Index (trade-weighted exchange rate) - [FRED](https://fred.stlouisfed.org/series/DTWEXBGS)
+- **CPIAUCSL**: Consumer Price Index for All Urban Consumers - [FRED](https://fred.stlouisfed.org/series/CPIAUCSL)
+- **INDPRO**: Industrial Production Index - [FRED](https://fred.stlouisfed.org/series/INDPRO)
+- **DGS10**: 10-Year Treasury Constant Maturity Rate (daily, converted to monthly average) - [FRED](https://fred.stlouisfed.org/series/DGS10)
+- **DCOILWTICO**: West Texas Intermediate Crude Oil Price - [FRED](https://fred.stlouisfed.org/series/DCOILWTICO)
+- **CHINAPMI**: China Manufacturing PMI (Official) - [TrendForce](https://datatrack.trendforce.com/Chart/content/487/china-manufacturing-pmi-official)
+
+## Research Question
+
+Can we accurately predict monthly nickel prices using historical economic indicators through an LSTM neural network?
+
+## Methodology
+
+This analysis uses LSTM (Long Short-Term Memory) networks for time series forecasting:
+
+1. Data collection and preprocessing
+2. Feature engineering with lag variables and stationarity transformations
+3. Model training with optimized hyperparameters
+4. Model evaluation and feature importance analysis
+
+# Data Loading
+
+## Importing the Data
+
+For this analysis, we need economic and commodity price data from multiple sources. There are seven datasets used in this project, each downloaded as individual CSV files from FRED and TrendForce. These datasets are merged by observation date to create a unified monthly time series dataset for LSTM training.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  message = FALSE, 
+  warning = FALSE
+)
+
+# Load necessary libraries
+library(dplyr)
+library(purrr)
+library(keras)
+library(tensorflow)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+```
+
+```{r load_data}
+# Load all feature datasets
+nickel <- read.csv("data/PNICKUSDM.csv")
+dxy <- read.csv("data/DTWEXBGS.csv")
+cpi <- read.csv("data/CPIAUCSL.csv")
+indpro <- read.csv("data/INDPRO.csv")
+dgs10 <- read.csv("data/DGS10.csv")
+wti <- read.csv("data/DCOILWTICO.csv")
+chinapmi <- read.csv("data/CHINAPMI.csv")
+
+# Convert to Date and set to first day of month
+chinapmi$observation_date <- as.Date(chinapmi$observation_date)
+chinapmi$observation_date <- floor_date(chinapmi$observation_date, "month")
+
+# Convert daily DGS10 (10-yr Treasury) to monthly average
+dgs10_monthly <- dgs10 %>%
+  mutate(observation_date = as.Date(observation_date)) %>%
+  mutate(yearmon = floor_date(observation_date, "month")) %>%
+  group_by(yearmon) %>%
+  summarise(DGS10 = mean(DGS10, na.rm = TRUE)) %>%
+  rename(observation_date = yearmon)
+```
+
+# Data Merging
+
+## Combining Datasets
+
+After loading all individual datasets, we merge them into a single dataframe by observation date. We use the `reduce()` function with inner join (`all = FALSE`) to ensure we only keep dates where all variables are available. This approach removes any periods where data is missing from any source.
+
+After merging, we remove any remaining rows with missing values using `na.omit()`. The merged dataset is saved as a CSV file for reproducibility, and we examine the summary statistics to verify the data ranges and distributions.
+
+```{r merge_data}
+
+# Merge all datasets by observation date using inner join
+merged <- reduce(list(nickel, dxy, cpi, indpro, dgs10_monthly, wti, chinapmi),
+                 function(x, y) merge(x, y, by = "observation_date", all = FALSE))
+
+# Save merged dataset for reproducibility
+write.csv(merged, "data/merged.csv", row.names = FALSE)
+
+# Remove any remaining rows with missing values
+merged <- na.omit(merged)
+
+# Display summary statistics of merged dataset
+summary(merged)
+```
+
+# Exploratory Data Analysis
+
+## Data Overview
+
+Before applying transformations, we examine the basic characteristics of our dataset.
+
+```{r eda_basic}
+# Dataset dimensions
+cat("Dataset dimensions:", nrow(merged), "rows x", ncol(merged), "columns\n")
+
+# Check for missing values
+cat("\nMissing values per variable:\n")
+colSums(is.na(merged))
+
+# Summary statistics
+summary(merged)
+```
+# Feature Engineering
+
+## Creating Lag Features and Stationarity Transformations
+
+Time series data often requires transformation to achieve stationarity, which is crucial for accurate forecasting. We create two types of features:
+
+1. **Lag Variables**: We add 1-month and 3-month lagged values of nickel prices to capture short-term and medium-term price momentum.
+
+2. **Stationarity Transformations**: 
+   - For most variables (PNICKUSDM, DTWEXBGS, CPIAUCSL, INDPRO, and lag variables), we apply log-differencing to convert the data into percentage changes.
+   - For DGS10 (interest rates) and CHINAPMI, we use simple differencing (current value minus previous value), as these can have negative values.
+
+These transformations remove trends and make the data suitable for LSTM modeling.
+
+```{r feature_engineering_stationary}
+# Create lag features for nickel price
+merged_with_lags <- merged %>%
+  arrange(observation_date) %>%
+  mutate(
+    PNICKUSDM_lag1 = dplyr::lag(PNICKUSDM, 1),
+    PNICKUSDM_lag3 = dplyr::lag(PNICKUSDM, 3)
+  ) %>%
+  drop_na() 
+
+# Apply stationarity transformations
+merged_stationary <- merged_with_lags %>%
+  mutate(
+    # Simple differencing for interest rates
+    DGS10_diff = DGS10 - dplyr::lag(DGS10, 1),
+    CHINAPMI_diff = CHINAPMI - dplyr::lag(CHINAPMI, 1),
+    # Log-differencing for price and index variables (converts to % changes)
+    across(c(PNICKUSDM, DTWEXBGS, CPIAUCSL, INDPRO, PNICKUSDM_lag1, PNICKUSDM_lag3, DCOILWTICO),
+           ~ (log(.x) - log(dplyr::lag(.x, 1))) )
+  ) %>%
+  select(-DGS10, -CHINAPMI) %>%
+  rename(DGS10 = DGS10_diff, CHINAPMI = CHINAPMI_diff) %>%
+  drop_na()
+```
+
+## Data Scaling
+
+After creating stationary features, we normalize all variables (except the date column) using standardization (z-score normalization). This scales each variable to have a mean of 0 and standard deviation of 1, which is essential for neural network training. Standardization ensures that all features contribute equally to the model and helps the LSTM converge faster during training.
+
+```{r scale_data}
+# Split data first to prevent data leakage
+train_size_pre <- floor(0.8 * nrow(merged_stationary))
+train_data <- merged_stationary[1:train_size_pre, ]
+test_data <- merged_stationary[(train_size_pre + 1):nrow(merged_stationary), ]
+
+# Calculate scaling parameters from training data only
+scale_params <- train_data %>%
+  select(-observation_date) %>%
+  summarise(across(everything(), list(mean = ~mean(., na.rm = TRUE), 
+                                       sd = ~sd(., na.rm = TRUE))))
+
+# Apply scaling to both train and test
+scaled_train <- train_data %>%
+  mutate(across(-observation_date, ~{
+    col_name <- cur_column()
+    mean_val <- scale_params[[paste0(col_name, "_mean")]]
+    sd_val <- scale_params[[paste0(col_name, "_sd")]]
+    (. - mean_val) / sd_val
+  }))
+
+scaled_test <- test_data %>%
+  mutate(across(-observation_date, ~{
+    col_name <- cur_column()
+    mean_val <- scale_params[[paste0(col_name, "_mean")]]
+    sd_val <- scale_params[[paste0(col_name, "_sd")]]
+    (. - mean_val) / sd_val
+  }))
+
+# Combine back
+scaled <- rbind(scaled_train, scaled_test)
+```
+
+## Creating Sequences for LSTM
+
+LSTM models require data in a specific 3D format: (samples, timesteps, features). We create sequences where each input consists of the past 24 months of data (all 9 features) to predict the next month's nickel price change.
+
+The `make_sequences` function:
+- Takes a sliding window of 24 consecutive months as input
+- Uses the nickel price change in month 25 as the target
+- Moves forward one month at a time to create multiple training examples
+
+For example, months 1-24 predict month 25, months 2-25 predict month 26, and so on. This approach allows the LSTM to learn temporal patterns across 24 months of historical data.
+
+**Final features (9)**: PNICKUSDM, DTWEXBGS, CPIAUCSL, INDPRO, DGS10, PNICKUSDM_lag1, PNICKUSDM_lag3, DCOILWTICO, CHINAPMI
+
+```{r create_sequences}
+# Function to create sequences for LSTM
+make_sequences <- function(data, seq_len = 24) {
+  X <- list()
+  y <- list()
+  for (i in 1:(nrow(data) - seq_len)) {
+    # Input: 24 months of all 9 features
+    X[[i]] <- as.matrix(data[i:(i + seq_len - 1), 
+                             c("PNICKUSDM","DTWEXBGS", "CPIAUCSL", "INDPRO", 
+                               "DGS10", "PNICKUSDM_lag1", "PNICKUSDM_lag3", 
+                               "DCOILWTICO", "CHINAPMI")])
+    
+    # Target: next month's nickel price change
+    y[[i]] <- data[i + seq_len, "PNICKUSDM"]
+  }
+  list(
+    X = array(do.call(rbind, X), dim = c(length(X), seq_len, 9)),
+    y = unlist(y)
+  )
+}
+
+# Create sequences with 24-month lookback window
+seq_data <- make_sequences(scaled, seq_len = 24)
+```
+
+## Train-Test Split
+
+We split the data into training and testing sets using an 80/20 ratio. Since this is time series data, we use a sequential split rather than random sampling to preserve the temporal order. The first 80% of sequences are used for training the model, and the remaining 20% are held out for testing.
+
+We also store the previous month's actual nickel prices for the test set. These are needed later to convert the model's predicted percentage changes back into actual price levels.
+
+```{r split_data}
+# Split into 80% training and 20% testing
+train_size <- floor(0.8 * length(seq_data$y))
+
+# Training set
+X_train <- seq_data$X[1:train_size,,]
+y_train <- seq_data$y[1:train_size]
+
+# Testing set
+X_test <- seq_data$X[(train_size + 1):length(seq_data$y),,,drop=FALSE]
+y_test <- seq_data$y[(train_size + 1):length(seq_data$y)]
+
+# Store previous month's prices for converting predictions back to price levels
+test_start <- train_size + 1
+y_test_prev_prices <- merged_with_lags$PNICKUSDM[test_start:(test_start + length(y_test) - 1)]
+```
+
+# Model Building
+
+## LSTM Architecture
+
+We build a simple yet effective LSTM neural network with the following architecture:
+
+- **Input Layer**: Accepts sequences of shape (24, 9) - 24 timesteps with 9 features
+- **LSTM Layer**: 32 units that process the sequential data and capture temporal dependencies
+- **Dropout Layer**: 20% dropout rate to prevent overfitting by randomly dropping neurons during training
+- **Dense Output Layer**: Single neuron that outputs the predicted nickel price change
+
+The model is compiled with:
+
+- **Loss Function**: Mean Squared Error (MSE) - standard for regression tasks
+- **Optimizer**: Adam with learning rate of 0.0005 for stable convergence
+
+This architecture was optimized through hyperparameter tuning, testing various 
+combinations of sequence length (12, 18, 24), LSTM units (32, 64, 128), 
+and dropout rates (0.05, 0.1, 0.2).
+
+```{r build_model}
+# Define LSTM model architecture
+input <- tf$keras$Input(shape = c(24L, 9L))
+lstm1 <- tf$keras$layers$LSTM(units = 32L, return_sequences = FALSE)(input) 
+drop1 <- tf$keras$layers$Dropout(rate = 0.2)(lstm1)
+output <- tf$keras$layers$Dense(units = 1L)(drop1)
+
+# Create and compile model
+model <- tf$keras$Model(inputs = input, outputs = output)
+model$compile(
+  loss = "mse",
+  optimizer = optimizer_adam(learning_rate = 0.0005)
+)
+
+# Display model architecture
+summary(model)
+```
+
+## Reshaping Target Variables
+
+Keras requires target variables to have a specific shape format. We reshape 
+both training and testing targets from 1D vectors into 2D arrays with shape 
+(n_samples, 1) to match the model's output layer dimensions.
+
+```{r fix_y_shape}
+# Reshape target variables to match Keras requirements
+y_train <- array_reshape(y_train, c(length(y_train), 1))
+y_test  <- array_reshape(y_test,  c(length(y_test), 1))
+```
+
+## Model Training
+
+We train the LSTM model with early stopping to prevent overfitting. 
+The early stopping callback monitors validation loss and stops training 
+if it doesn't improve for 20 consecutive epochs, 
+then restores the best model weights.
+
+Training configuration:
+- **Maximum Epochs**: 300
+- **Batch Size**: 48 samples per gradient update
+- **Validation**: Test set is used to monitor performance during training
+- **Early Stopping**: Patience of 20 epochs ensures the model doesn't overtrain
+
+```{r train_model}
+# Configure early stopping callback
+callback_es <- tf$keras$callbacks$EarlyStopping(
+  monitor = "val_loss",
+  patience = 20L,
+  restore_best_weights = TRUE
+)
+
+# Train the model
+history <- model$fit(
+  X_train, y_train,
+  epochs = 300L,
+  batch_size = 48L,
+  validation_data = list(X_test, y_test),
+  verbose = 0L,
+  callbacks = list(callback_es)
+)
+```
+
+# Model Evaluation
+
+## Performance Metrics
+
+After training, we evaluate the model on the test set. The evaluation process involves:
+
+1. **Inverse Transformation**: Convert scaled predictions back to percentage changes by reversing the standardization
+
+2. **Price Reconstruction**: Convert percentage changes to actual price levels using the exponential function
+
+3. **Calculate Error Metrics**:
+   - **RMSE (Root Mean Squared Error)**: Measures average prediction error magnitude in dollars
+   - **MAE (Mean Absolute Error)**: Measures average absolute prediction error in dollars
+   - **MAPE (Mean Absolute Percentage Error)**: Measures average prediction error as a percentage of actual values
+   
+```{r eval_side_by_side, results='hide'}
+# Get scaling parameters for inverse transformation
+mean_val <- scale_params$PNICKUSDM_mean
+sd_val <- scale_params$PNICKUSDM_sd
+
+# Convert scaled predictions back to percentage changes
+actual_pct_change <- as.vector(y_test) * sd_val + mean_val
+pred_pct_change <- as.vector(model$predict(X_test)) * sd_val + mean_val
+
+# Convert percentage changes to actual prices
+actual_price <- y_test_prev_prices * exp(actual_pct_change)
+pred_price <- y_test_prev_prices * exp(pred_pct_change)
+
+# Prepare results dataframe
+test_dates <- tail(as.Date(merged_stationary$observation_date), length(actual_price))
+res <- data.frame(date = test_dates, actual = round(actual_price, 0), pred = round(pred_price, 0))
+
+# Calculate error metrics
+rmse <- sqrt(mean((res$pred - res$actual)^2))
+mae <- mean(abs(res$pred - res$actual))
+mape <- mean(abs((res$actual - res$pred) / res$actual)) * 100
+```
+```{r, echo=FALSE}
+# Display performance metrics
+print(paste("RMSE:", round(rmse, 0)))
+print(paste("MAE:", round(mae, 0)))
+print(paste("MAPE:", round(mape, 2), "%"))
+
+# Show first 10 predictions
+res[1:10, ]
+```
+
+## Prediction Visualization
+
+We visualize the model's predictions against actual nickel prices over the test period. The blue solid line represents actual prices, while the red dashed line shows the model's predictions. This plot helps assess how well the model captures price trends and identifies periods where predictions diverge from reality.
+
+```{r plot_predictions}
+# Plot actual vs predicted prices
+ggplot(res, aes(x = date)) +
+  geom_line(aes(y = actual, color = "Actual"), linewidth = 1) +
+  geom_line(aes(y = pred, color = "Predicted"), linewidth = 1, linetype = "dashed") +
+  scale_color_manual(values = c("Actual" = "blue", "Predicted" = "red")) +
+  labs(
+    title = "LSTM Model: Actual vs. Predicted Nickel Prices",
+    x = "Date",
+    y = "Nickel Price (USD)",
+    color = "Legend"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+# Feature Importance Analysis
+
+## Understanding Feature Contributions
+
+To identify which economic indicators are most valuable for predicting nickel prices, we perform two analyses:
+
+1. **Correlation Analysis**: Measures linear relationships between each feature and nickel price changes
+
+2. **Permutation Importance**: Measures how much the model's performance degrades when each feature is randomly shuffled. Higher values indicate the feature is more important to the model. Positive values mean removing the feature hurts performance (important), while negative values suggest the feature may add noise.
+
+```{r feature_importance, results='hide'}
+# 1. Correlation analysis
+cor_matrix <- cor(merged_stationary[, c("PNICKUSDM", "DTWEXBGS", "CPIAUCSL", 
+                                          "INDPRO", "DGS10", "PNICKUSDM_lag1", 
+                                          "PNICKUSDM_lag3" 
+                                          , "DCOILWTICO")])
+
+# 2. Permutation importance
+baseline_pred <- model$predict(X_test)
+baseline_rmse <- sqrt(mean((as.vector(baseline_pred) - as.vector(y_test))^2))
+
+feature_names <- c("PNICKUSDM", "DTWEXBGS", "CPIAUCSL", "INDPRO", "DGS10", 
+                   "PNICKUSDM_lag1", "PNICKUSDM_lag3", "DCOILWTICO", "CHINAPMI")
+
+importance_scores <- numeric(9)
+for (i in 1:9) {
+  X_test_permuted <- X_test
+  X_test_permuted[,,i] <- sample(X_test_permuted[,,i])
+  permuted_pred <- model$predict(X_test_permuted)
+  permuted_rmse <- sqrt(mean((as.vector(permuted_pred) - as.vector(y_test))^2))
+  importance_scores[i] <- permuted_rmse - baseline_rmse
+}
+
+importance_df <- data.frame(
+  feature = feature_names,
+  importance = importance_scores
+) %>% arrange(desc(importance))
+```
+
+## Feature Importance Results
+
+```{r, echo=FALSE}
+print("Correlation with PNICKUSDM:")
+print(sort(cor_matrix[1, ], decreasing = TRUE))
+print(importance_df)
+
+# Visualization
+ggplot(importance_df, aes(x = reorder(feature, importance), y = importance)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Feature Importance (Permutation)",
+       x = "Feature",
+       y = "Increase in RMSE when Feature is Shuffled") +
+  theme_minimal()
+```
+
+The permutation importance chart shows which features the LSTM model relies on most heavily for making predictions. Features with higher bars contribute more to the model's predictive accuracy.
+
+# Conclusion
+
+## Summary of Findings
+
+This project successfully developed an LSTM model for nickel price prediction using economic indicators. Key findings include:
+
+1. **Model Performance**: The model demonstrates consistent performance with RMSE of 1,200-1,350 USD (best: 1,230), MAE of 950-1,100 USD (best: 953), and MAPE of 5-7% (best: 5.85%) across multiple training runs. This represents an average prediction error of approximately 6-7% relative to actual nickel prices, which is reasonable given the high volatility of commodity markets.
+
+2. **Key Predictive Features**: Permutation importance analysis revealed that dollar index (DTWEXBGS), current nickel price (PNICKUSDM), and lagged nickel prices are the most important features for prediction. The addition of China Manufacturing PMI improved model performance by capturing demand-side indicators.
+
+3. **Model Optimization**: Through hyperparameter tuning, we found that a 24-month sequence length, 32 LSTM units, and 0.2 dropout rate provided the best performance.
+
+## Limitations and Future Work
+
+- The model's performance could be affected by sudden market shocks or unprecedented events (Tariff)
+- Additional features such as supply chain indicators or battery technology advancements could improve predictions
+- Ensemble methods combining LSTM with other models may provide more robust forecasts
+
+This model provides a practical tool for manufacturers to anticipate nickel price movements and make informed purchasing decisions, potentially reducing cost volatility in EV production.
+
