@@ -1,5 +1,0 @@
-"0","library(httr)       # For making API calls"
-"0","library(jsonlite)   # For parsing JSON data"
-"0","library(dplyr)      # For data manipulation"
-"0","library(readr)      # For reading/writing CSV files"
-"0","library(ggplot2)    # For plotting"

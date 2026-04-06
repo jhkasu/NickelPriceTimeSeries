@@ -1,4 +1,0 @@
-"0","par(mfrow = c(2, 1))"
-"0",""
-"0","# ACF plot"
-"0","acf(df_diff, main = ""ACF of Differenced Series"", lag.max = 40)"

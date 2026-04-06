@@ -1,3 +1,0 @@
-"0",""
-"0","# PACF plot"
-"0","pacf(df_diff, main = ""PACF of Differenced Series"", lag.max = 40)"

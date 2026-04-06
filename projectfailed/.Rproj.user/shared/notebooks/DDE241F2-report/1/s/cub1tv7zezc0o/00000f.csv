@@ -1,2 +1,0 @@
-"0","# Generate 30-day forecast"
-"0","forecast_result <- forecast(arima_model, h = 30)"

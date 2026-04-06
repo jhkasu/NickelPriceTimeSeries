@@ -1,5 +1,0 @@
-"0","# Display forecast values"
-"0","cat(""Forecasted prices for the next 30 days:\n"")"
-"1","Forecasted prices for the next 30 days:
-"
-"0","print(forecast_result)"
